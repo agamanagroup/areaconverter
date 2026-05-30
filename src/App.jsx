@@ -111,11 +111,9 @@ function saveStore(patch) {
   } catch (e) { /* ignore */ }
 }
 const saved = loadStore();
-const prefersDark = typeof window !== "undefined" && window.matchMedia
-  ? window.matchMedia("(prefers-color-scheme: dark)").matches : false;
 const store = {
   lang: saved.lang || "en",
-  theme: saved.theme || (prefersDark ? "dark" : "light"),
+  theme: saved.theme || "light", // default to light; remembers user's explicit choice
   recent: Array.isArray(saved.recent) ? saved.recent : [],
   installDismissed: !!saved.installDismissed,
 };
@@ -129,7 +127,38 @@ export default function App() {
   const [tab, setTab] = useState("convert");
   const [toast, setToast] = useState("");
   const [recent, setRecent] = useState(store.recent);
-  const [showInstall, setShowInstall] = useState(!store.installDismissed);
+  const [showInstall, setShowInstall] = useState(false);
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
+
+  // Capture the browser's install prompt (Chrome/Edge/Android).
+  useEffect(() => {
+    const onBIP = (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+      if (!store.installDismissed) setShowInstall(true);
+    };
+    window.addEventListener("beforeinstallprompt", onBIP);
+    const onInstalled = () => { setShowInstall(false); setDeferredPrompt(null); };
+    window.addEventListener("appinstalled", onInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onBIP);
+      window.removeEventListener("appinstalled", onInstalled);
+    };
+  }, []);
+
+  const triggerInstall = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      try { await deferredPrompt.userChoice; } catch (e) { /* ignore */ }
+      setDeferredPrompt(null);
+      setShowInstall(false);
+    } else {
+      // iOS Safari has no install API; guide the user instead.
+      showToast(lang === "en" ? "Tap Share, then Add to Home Screen" : "ಶೇರ್ ಒತ್ತಿ, ನಂತರ ಹೋಮ್ ಸ್ಕ್ರೀನ್‌ಗೆ ಸೇರಿಸಿ");
+      saveStore({ installDismissed: true });
+      setShowInstall(false);
+    }
+  };
 
   // shared converter state (so popular/chips can drive it)
   const [value, setValue] = useState("1");
@@ -216,7 +245,7 @@ export default function App() {
             <div style={{ fontWeight: 700, fontSize: 14 }}>{t.install}</div>
             <div style={{ fontSize: 12.5, color: "var(--muted)" }}>{t.installSub}</div>
           </div>
-          <button onClick={() => { saveStore({ installDismissed: true }); setShowInstall(false); showToast(t.install); }} style={{ ...solidBtn, padding: "8px 14px", fontSize: 13 }}>Install</button>
+          <button onClick={triggerInstall} style={{ ...solidBtn, padding: "8px 14px", fontSize: 13 }}>Install</button>
           <button onClick={() => { saveStore({ installDismissed: true }); setShowInstall(false); }} aria-label="Dismiss" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer" }}><X size={18} /></button>
         </div>
       )}
@@ -292,9 +321,11 @@ function ConvertTab({ t, lang, value, setValue, fromUnit, setFromUnit, showToast
     addRecent({ label: `${fmt(num)} ${fu.short}`, val: num, unit: fromUnit });
   };
 
+  const [ddOpen, setDdOpen] = useState(false);
+
   return (
     <div>
-      <Card>
+      <Card style={{ position: "relative", zIndex: ddOpen ? 200 : "auto" }}>
         <Label>{t.areaValue}</Label>
         <input
           type="number" inputMode="decimal" value={value}
@@ -303,7 +334,7 @@ function ConvertTab({ t, lang, value, setValue, fromUnit, setFromUnit, showToast
         />
         <div style={{ marginTop: 18 }}>
           <Label>{t.selectUnit}</Label>
-          <UnitDropdown lang={lang} value={fromUnit} onChange={setFromUnit} t={t} />
+          <UnitDropdown lang={lang} value={fromUnit} onChange={setFromUnit} t={t} onToggle={setDdOpen} />
         </div>
       </Card>
 
@@ -311,7 +342,7 @@ function ConvertTab({ t, lang, value, setValue, fromUnit, setFromUnit, showToast
         <Repeat size={14} /> {t.tapToConvert}
       </div>
 
-      <div style={{ display: "grid", gap: 10, position: "relative", zIndex: 1 }}>
+      <div className={ddOpen ? "chips-flat" : ""} style={{ display: "grid", gap: 10, position: "relative", zIndex: ddOpen ? 0 : 1 }}>
         {UNITS.filter((u) => u.id !== fromUnit).map((u, i) => (
           <button key={u.id} className="reveal chip" style={{ animationDelay: `${i * 45}ms` }}
             onClick={() => goConvert(Math.round(results[u.id] * 100) / 100, u.id)}>
@@ -471,16 +502,19 @@ function RecentTab({ t, recent, goConvert, clear }) {
 }
 
 /* ---------- Searchable unit dropdown ---------- */
-function UnitDropdown({ lang, value, onChange, t }) {
-  const [open, setOpen] = useState(false);
+function UnitDropdown({ lang, value, onChange, t, onToggle }) {
+  const [open, setOpenRaw] = useState(false);
   const [q, setQ] = useState("");
   const ref = useRef(null);
   const sel = unitById(value);
 
+  const setOpen = (v) => { setOpenRaw(v); onToggle && onToggle(v); };
+
   useEffect(() => {
     const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
     document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
+    document.addEventListener("touchstart", h);
+    return () => { document.removeEventListener("mousedown", h); document.removeEventListener("touchstart", h); };
   }, []);
 
   const filtered = UNITS.filter((u) =>
@@ -490,26 +524,26 @@ function UnitDropdown({ lang, value, onChange, t }) {
   );
 
   return (
-    <div ref={ref} style={{ position: "relative", zIndex: open ? 100 : "auto" }}>
+    <div ref={ref} style={{ position: "relative", zIndex: open ? 300 : "auto" }}>
       <button onClick={() => setOpen(!open)} style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "13px 15px", borderRadius: 12, border: "1px solid var(--line)", background: "var(--card)", color: "var(--ink)", fontWeight: 700, fontSize: 15, cursor: "pointer", fontFamily: displayFont }}>
         {sel[lang]}
         <ChevronDown size={18} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform .2s", color: "var(--muted)" }} />
       </button>
       {open && (
-        <div className="rise" style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, right: 0, background: "var(--card)", border: "1px solid var(--line)", borderRadius: 14, boxShadow: "0 12px 36px rgba(0,0,0,.28)", zIndex: 100, overflow: "hidden" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: "1px solid var(--line)" }}>
+        <div className="rise" style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, right: 0, background: "var(--card)", border: "1px solid var(--line)", borderRadius: 14, boxShadow: "0 12px 40px rgba(0,0,0,.35)", zIndex: 300, overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: "1px solid var(--line)", background: "var(--card)" }}>
             <Search size={16} style={{ color: "var(--muted)" }} />
             <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder={t.searchUnit}
               style={{ flex: 1, border: "none", outline: "none", background: "transparent", color: "var(--ink)", fontSize: 14 }} />
           </div>
-          <div style={{ maxHeight: 240, overflowY: "auto" }}>
+          <div style={{ maxHeight: 240, overflowY: "auto", background: "var(--card)" }}>
             {filtered.map((u) => (
               <button key={u.id} onClick={() => { onChange(u.id); setOpen(false); setQ(""); }}
-                style={{ width: "100%", textAlign: "left", padding: "12px 15px", border: "none", background: u.id === value ? "var(--brandSoft)" : "transparent", color: u.id === value ? "var(--brand)" : "var(--ink)", fontWeight: u.id === value ? 700 : 500, fontSize: 14.5, cursor: "pointer", display: "flex", justifyContent: "space-between" }}>
+                style={{ width: "100%", textAlign: "left", padding: "12px 15px", border: "none", background: u.id === value ? "var(--brandSoft)" : "var(--card)", color: u.id === value ? "var(--brand)" : "var(--ink)", fontWeight: u.id === value ? 700 : 500, fontSize: 14.5, cursor: "pointer", display: "flex", justifyContent: "space-between" }}>
                 {u[lang]} <span style={{ color: "var(--muted)", fontSize: 12 }}>{u.short}</span>
               </button>
             ))}
-            {!filtered.length && <div style={{ padding: 16, color: "var(--muted)", fontSize: 14 }}>—</div>}
+            {!filtered.length && <div style={{ padding: 16, color: "var(--muted)", fontSize: 14, background: "var(--card)" }}>—</div>}
           </div>
         </div>
       )}
@@ -518,8 +552,8 @@ function UnitDropdown({ lang, value, onChange, t }) {
 }
 
 /* ---------- Small UI primitives ---------- */
-const Card = ({ children }) => (
-  <div className="reveal" style={{ background: "var(--card)", border: "1px solid var(--line)", borderRadius: 18, padding: 18, boxShadow: "0 1px 3px rgba(0,0,0,.04)" }}>{children}</div>
+const Card = ({ children, style }) => (
+  <div className="reveal" style={{ background: "var(--card)", border: "1px solid var(--line)", borderRadius: 18, padding: 18, boxShadow: "0 1px 3px rgba(0,0,0,.04)", ...style }}>{children}</div>
 );
 const Label = ({ children }) => (
   <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".6px", marginBottom: 8 }}>{children}</div>
@@ -572,6 +606,10 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 .chip:hover { border-color:var(--accent); box-shadow:0 4px 16px rgba(81,186,124,.18); }
 .pop:active { transform:scale(.95); } .pop { transition:transform .12s; }
 .refrow:active { opacity:.6; }
+/* When the unit dropdown is open, flatten the result chips so their
+   CSS transforms don't create stacking contexts that paint over the menu. */
+.chips-flat .chip, .chips-flat .reveal { animation:none !important; transform:none !important; }
+.chips-flat .chip:hover { box-shadow:none; border-color:var(--line); }
 .iconbtn:active { transform:scale(.92); } .iconbtn { transition:transform .12s; }
 .reveal { animation: reveal .45s cubic-bezier(.2,.7,.3,1) both; }
 @keyframes reveal { from { opacity:0; transform:translateY(10px);} to {opacity:1; transform:none;} }

@@ -8,6 +8,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: "autoUpdate",
+      injectRegister: "auto",
       includeAssets: ["icons/favicon.png", "icons/icon-192.png", "icons/icon-512.png"],
       manifest: {
         name: "Agamana Area Converter",
